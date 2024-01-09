@@ -5,14 +5,14 @@ const nodemailer = require("nodemailer");
 const crypto = require('crypto');
 const bodyParser = require('body-parser');
 const forge = require('node-forge');
-const e = require("express");
+const {createDiffieHellman} = require("diffie-hellman");
+const prime = Buffer.from('', 'hex');
+const generator = Buffer.from('', 'hex');
 
-function pemToString(pem) {
-    // Remover los encabezados y pie de página y cualquier salto de línea
-    return pem.replace(/-----BEGIN (.*)-----/, '')
-        .replace(/-----END (.*)-----/, '')
-        .replace(/\r?\n|\r/g, '')
-        .trim();
+function toHex(str) {
+    return str
+        .toString(16) // Convert to hexadecimal representation
+        .padStart(str.length * 2, '0'); // Pad with leading zeros to ensure consistent length
 }
 
 const transporter = nodemailer.createTransport({
@@ -31,8 +31,8 @@ app.use(cors());
 app.use(express.json());
 
 const db = mysql.createConnection({
-    host: "localhost",
-    user: "root",
+    host: "",
+    user: "",
     password: "",
     database: ""
 });
@@ -41,6 +41,8 @@ app.post('/signup', (req, res) => {
     const keyPair = forge.pki.rsa.generateKeyPair({ bits: 2048 });
     const publicKeyPem = forge.pki.publicKeyToPem(keyPair.publicKey);
     const privateKeyPem = forge.pki.privateKeyToPem(keyPair.privateKey);
+    const dh = createDiffieHellman(prime, generator);
+    dh.generateKeys();
     const token = crypto.createHash('md5').update(req.body.email + req.body.password).digest('hex');
     const values = [
         req.body.username,
@@ -49,8 +51,8 @@ app.post('/signup', (req, res) => {
         token
     ];
 
-    const sqlkeys = 'insert into userkeys (usertoken, publickey, privatekey) values (?)';
-    db.query(sqlkeys, [[token, publicKeyPem, privateKeyPem]], (err, data) => {
+    const sqlkeys = 'insert into userkeys (usertoken, publickey, privatekey, dhpublickey, dhprivatekey) values (?)';
+    db.query(sqlkeys, [[token, publicKeyPem, privateKeyPem, dh.getPublicKey('hex'), dh.getPrivateKey('hex')]], (err, data) => {
         if(err) {
             console.log(err);
             const deleteSql = 'DELETE FROM userkeys WHERE usertoken = ?';
@@ -399,6 +401,49 @@ app.get('/getpublickey', (req, res) => {
             return res.status(200).json({publickey: data[0].publickey});
         else
             return res.status(500).json("Llave no encontrada");
+    });
+});
+
+app.get('/getdhpublickey', (req, res) => {
+    const { token } = req.query;
+
+    const sqlgetkeys = 'select * from userkeys where usertoken = ?';
+
+    db.query(sqlgetkeys, [token], (err, data) => {
+        if(err){
+            console.log(err)
+            return res.status(500).send(`Error al buscar llave`);
+        }
+        if (data.length > 0)
+            return res.status(200).json({dhpublickey: data[0].dhpublickey});
+        else
+            return res.status(500).json("Llave no encontrada");
+    });
+});
+
+app.get('/generatedhsecret', (req, res) => {
+    const { token, dhpublickey } = req.query;
+
+    const sqlgetkeys = 'select * from userkeys where usertoken = ?';
+
+    db.query(sqlgetkeys, [token], (err, data) => {
+        if(err){
+            console.log(err)
+            return res.status(500).send(`Error al buscar llave`);
+        }
+        if (data.length > 0) {
+            const yourPrivateKey = Buffer.from(data[0].dhprivatekey, 'hex');
+            const otherPublicKeyBuffer = Buffer.from(dhpublickey, 'hex');
+
+            const dh = crypto.createDiffieHellman(prime, generator);
+            dh.setPrivateKey(yourPrivateKey);
+            const secret = dh.computeSecret(otherPublicKeyBuffer);
+
+            return res.status(200).json({dhsecretkey: secret.toString('hex')});
+        }
+        else {
+            return res.status(500).json("Llave no encontrada");
+        }
     });
 });
 
